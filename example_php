@@ -1,0 +1,249 @@
+public function export() {
+
+    if (isset($this->request->get['order_id'])) {
+        $order_id = $this->request->get['order_id'];
+    }
+
+    if (isset($this->request->get['score_num'])) {
+        $score_num = $this->request->get['score_num'] . 'п';
+    } else {
+        $score_num = '';
+    }
+
+    if (isset($this->request->get['score_customer'])) {
+        $score_customer = $this->request->get['score_customer'];
+    } else {
+        $score_customer = '';
+    }
+
+    if (isset($this->request->get['score_date'])) {
+        $score_date = $this->request->get['score_date'];
+    } else {
+        $score_date = '';
+    }
+    
+    $this->load->model('sale/order');
+    $this->load->model('setting/setting');
+
+    require_once(DIR_SYSTEM . 'library/PHPExcel.php');
+
+    $objPHPExcel = new PHPExcel();
+
+    $invoice_dates =  array(
+        'ivice_nomber'      =>'РАХУНОК-ФАКТУРА № ' . $score_num,
+        'ivice_date'        =>'від ' . $score_date . 'р.',
+        'company_data1'     =>'Постачальник: ПП "xxxxxx"',
+        'company_data1'     =>'IBAN UAxxxxxxxxxxxx xxxxxxxxxx',
+        'company_data2'     =>'в  АТ "БАНК "ГРАНТ"',
+        'company_data3'     =>'ЄДРПОУ  xxxxxxx,   МФО xxxxxxxx',
+        'customer'          =>'Платник: ' . html_entity_decode($score_customer),
+        'description'       =>'Доповнення:',
+    );
+
+    $i_row= 1;
+    foreach ($invoice_dates as $invoice_date) {
+        $data['orders'][] = array($invoice_date);
+        $objPHPExcel->getActiveSheet()->mergeCells('B'. $i_row . ':G' . $i_row);
+        $i_row++;
+    }
+    $objPHPExcel->getActiveSheet()->getStyle('B1:B6')->getFont()->setBold(true);
+    $objPHPExcel->getActiveSheet()->getStyle('B1:B2')->getAlignment()->setHorizontal(PHPExcel_Style_Alignment::HORIZONTAL_CENTER);
+    $objPHPExcel->getActiveSheet()->getStyle('B1:B2')->getFont()->setSize(14);
+    $objPHPExcel->getActiveSheet()->getStyle('B3:B6')->getFont()->setSize(12);
+
+    $width_colls = array ('A'=>2, 'B'=>4, 'C'=>45, 'D'=>7, 'E'=>7, 'F'=>10, 'G'=>10);
+    foreach ($width_colls as $key=>$width_coll) {
+        $objPHPExcel->getActiveSheet()->getColumnDimension($key)->setWidth($width_coll);
+    }
+
+    $data['orders'][] = array('№ з/п','Найменування','Од. вим.','Кількість','Ціна без ПДВ','Сумма без ПДВ');
+    $objPHPExcel->getActiveSheet()->getStyle('B8:G8')->getAlignment()->setWrapText(true);
+    $objPHPExcel->getActiveSheet()->getStyle('B8:G8')->getAlignment()->setHorizontal(PHPExcel_Style_Alignment::HORIZONTAL_CENTER);
+    $objPHPExcel->getActiveSheet()->getStyle('B8:G8')->getFont()->setBold(true);
+    $objPHPExcel->getActiveSheet()->getStyle('B8:G8')->getFill()->setFillType(PHPExcel_Style_Fill::FILL_SOLID)->getStartColor()->setARGB('DDDDDDDD');
+
+    $invoice_data = array(
+        'order_id'          => $order_id,
+        'invoice_no'        => $score_num,
+        'firstname'         => $score_customer,
+        'tracking'          => $score_date
+    );
+
+    $this->model_sale_order->editOrderByOrderIdForInvoice($invoice_data);
+
+    $products = $this->model_sale_order->getOrderProducts($order_id);
+
+    $totals_invoice = 0;
+
+    $i_numder = 1;
+    $i_row_product = 9;
+
+    foreach ($products as $product) {
+        $option_data = array();
+
+        $options = $this->model_sale_order->getOrderOptions($this->request->get['order_id'], $product['order_product_id']);
+
+        foreach ($options as $option) {
+            if ($option['type'] != 'file') {
+                $option_data[] = array(
+                    'name'  => $option['name'],
+                    'value' => $option['value'],
+                    'type'  => $option['type'],
+                    'name_invoice' => $this->model_sale_order->getNameInvoiceByOptioName($option['value']),
+                );
+            } else {
+                $upload_info = $this->model_tool_upload->getUploadByCode($option['value']);
+
+                if ($upload_info) {
+                    $option_data[] = array(
+                        'name'  => $option['name'],
+                        'value' => $upload_info['name'],
+                        'type'  => $option['type'],
+                        'href'  => $this->url->link('tool/upload/download', 'token=' . $this->session->data['token'] . '&code=' . $upload_info['code'], 'SSL')
+                    );
+                }
+            }
+        }
+
+        $name_invoice = preg_split('/[(-)]/', $product['model']);
+
+        if (isset($name_invoice[1]) && isset($option_data[0]['name_invoice'])) {
+            $name_invoice =  $name_invoice[0] . $option_data[0]['name_invoice'] . ' (' . $name_invoice[1] . ') ';
+        } else if (isset($option_data[0]['name_invoice'])) {
+            $name_invoice = $name_invoice[0] . ' '. $option_data[0]['name_invoice'];
+        } else {
+            $name_invoice = $product['model'];
+        }
+
+        $weight_option = 0;
+        if (isset($option_data[0]['value'])) { // Check spasifik option for big waight
+            preg_match('/(?<=\()(.+)(?=кг)/is', $option_data[0]['value'], $weight_info);
+            if ($weight_info) {
+                $weight_option = (int)$weight_info[0];
+            }
+        }
+
+        $weight = (int)round($product['weight'], -1);
+
+        $weight_type = 'кг';
+
+        if ($weight >= 40 && $weight_option ) { // Check who is who: kg or pes
+            $quantity_invoice = $weight_option * $product['quantity'];
+            $price_invoice = round((((float)$product['price'] / 6 * 5) / $weight_option), 4);
+        } else if ($weight >= 40) {
+            $quantity_invoice = $weight * $product['quantity'];
+            $price_invoice = round((((float)$product['price'] / 6 * 5) / $weight), 4);
+        } else {
+            $quantity_invoice = $product['quantity'];
+            $weight_type = 'шт';
+            $price_invoice = round(((float)$product['price'] / 6 * 5), 4);
+        }
+
+        $invoice_href = HTTP_CATALOG  . $this->model_sale_order->getSeoUrlByProduct($product['product_id']);
+
+        $data['orders'][] = array(
+            'namber'            => $i_numder,
+            'name_invoice'      => $name_invoice,
+            'weight'            => $weight_type,
+            'quantity_invoice'  => $quantity_invoice,
+            'price_invoice'    	=> sprintf("%.2f", $price_invoice),
+        );
+
+        $objPHPExcel->getActiveSheet()->setCellValue('G' . $i_row_product, sprintf('=%s*%s', 'E' . $i_row_product, 'F' . $i_row_product));
+        $objPHPExcel->getActiveSheet()->getCell('C' .  $i_row_product)->getHyperlink()->setUrl($invoice_href);
+        $totals_invoice += $total_invoice;
+        $i_numder++;
+        $i_row_product++;
+    }
+
+    $data['orders'][] = array();
+    
+    $i_row = count($data['orders']) + 1;
+
+    $invoice_tatals = array (
+        'ВСЬОГО без ПДВ (грн.)'       => $totals_invoice,
+        'ПДВ 20% (грн.)'              => $totals_invoice * 1.2 - $totals_invoice,
+        'ВСЬОГО сплати (грн.)'        => $totals_invoice * 1.2,
+    );
+
+    $i_row_last =  $i_row + count($invoice_tatals);
+
+    $objPHPExcel->getActiveSheet()->getStyle('B' .  $i_row . ':B' . $i_row_last)->getAlignment()->setHorizontal(PHPExcel_Style_Alignment::HORIZONTAL_RIGHT);
+    $objPHPExcel->getActiveSheet()->getStyle('B' .  $i_row . ':B' . $i_row_last)->getFont()->setBold(true);
+
+    $i_row_totals_invoice = $i_row_product + 1;
+    $i_row_totals_invoice_with_vat = $i_row + 2;
+    $i_row_totals_vat = $i_row + 1;
+
+    $objPHPExcel->getActiveSheet()->setCellValue('G'.$i_row, sprintf('=SUM(%s:%s)', 'G9', 'G' . $i_row_totals_invoice));
+    $objPHPExcel->getActiveSheet()->setCellValue('G'.$i_row_totals_invoice_with_vat, sprintf('=%s*1.2', 'G' . $i_row));
+    $objPHPExcel->getActiveSheet()->setCellValue('G'.$i_row_totals_vat, sprintf('=%s-%s', 'G' . $i_row_totals_invoice_with_vat, 'G' . $i_row));
+    foreach ($invoice_tatals as $key=>$invoice_tatal) {
+        $data['orders'][] = array($key, '', '', '', '');
+        $objPHPExcel->getActiveSheet()->mergeCells('B'.  $i_row . ':F' . $i_row);
+        $i_row++;
+    }
+    $objPHPExcel->getActiveSheet()->getStyle('F9:G' . $i_row)->getNumberFormat()->setFormatCode('0.00');
+
+    $i_row = count($data['orders']);
+
+    $objPHPExcel->getActiveSheet()->getStyle('B8:G' . $i_row)->applyFromArray(
+        array(
+            'borders' => array(
+                'allborders' => array(
+                    'style' => PHPExcel_Style_Border::BORDER_THIN
+                )
+            )
+        )
+    );
+
+    $data['orders'][] = array ();
+
+    $last_infos = array('СУМА ДО СПЛАТИ:    ...грн. ..коп.', '', 'Рахунок дійсний до сплати протягом п\'яти робочих днів', '', '', HTTP_SERVER, '(044) 223-87-82', '(095) 472-55-33', '(097) 472-55-33','');
+
+    $i_row +=1;
+
+    foreach ($last_infos as $last_info) {
+        $i_row++;
+        $data['orders'][] = array($last_info);
+        $objPHPExcel->getActiveSheet()->mergeCells('B'.  $i_row . ':F' . $i_row);
+        if (stristr($last_info, 'Рахунок') == true) continue;
+        $objPHPExcel->getActiveSheet()->getStyle('B' .  $i_row)->getFont()->setBold(true);
+        if (stristr($last_info, 'www') == true) {
+            $i_row_image = $i_row;
+            $objPHPExcel->getActiveSheet()->getCell('B' .  $i_row)->getHyperlink()->setUrl(HTTP_CATALOG);
+            $objPHPExcel->getActiveSheet()->getStyle('B' .  $i_row)->getFont()->getColor()->setRGB('0000ff');
+            $objPHPExcel->getActiveSheet()->getStyle('B' .  $i_row)->getFont()->setUnderline(true);
+        }
+    }
+
+    $imagePath = DIR_IMAGE . '/catalog/Logo_23.png';
+
+    if (file_exists($imagePath) && $i_row_image) {
+        $logo = new PHPExcel_Worksheet_Drawing();
+        $logo->setPath($imagePath);
+        $logo->setCoordinates('D' . $i_row_image);
+        $logo->setOffsetX(-80);
+        $logo->setWidth(300);
+        $logo->setWorksheet($objPHPExcel->getActiveSheet());
+    }
+
+    $filename='Cчет-фактра ГЕЯ-ЛКЗ №' . $score_num . ' (' . html_entity_decode($score_customer) . ') ' . date('d.m.Y');
+
+    $objPHPExcel->getActiveSheet()->fromArray($data['orders'], null, 'B1');
+
+		// Set active sheet index to the first sheet, so Excel opens this as the first sheet
+		$objPHPExcel->setActiveSheetIndex(0);
+
+		// Save Excel 95 file
+		$callStartTime = microtime(true);
+		$objWriter = PHPExcel_IOFactory::createWriter($objPHPExcel, 'Excel5');
+		
+		//Setting the header type
+		header('Content-Type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+		header("Content-Disposition: attachment; filename=\"" . $filename . ".xls\"");
+		
+		header('Cache-Control: max-age=0');
+
+		$objWriter->save('php://output');
+	}
